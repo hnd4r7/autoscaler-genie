@@ -1,0 +1,22 @@
+[package]
+name = "autoscaler-genie"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.23.0", features = ["macros", "rt-multi-thread"] }
+actix-web = "4.3.1"
+anyhow = "1.0.71"
+futures = "0.3.28"
+k8s-openapi = { version = "0.18.0", features = ["v1_25", "schemars"] }
+kube = { version = "0.82.2", features = ["runtime", "client", "derive"] }
+schemars = { version = "0.8.12", features = ["derive_json_schema"] }
+serde = { version = "1.0.162", features = ["derive", "alloc"] }
+serde_json = "1.0.96"
+serde_yaml = "0.9.21"
+thiserror = "1.0.40"
+validator = "0.16.0"
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.16", features = ["json", "env-filter"] }
