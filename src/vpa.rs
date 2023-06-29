@@ -22,8 +22,8 @@ pub struct VerticalPodAutoscalerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "resourcePolicy")]
     pub resource_policy: Option<VerticalPodAutoscalerResourcePolicy>,
     /// TargetRef points to the controller managing the set of pods for the autoscaler to control - e.g. Deployment, StatefulSet. VerticalPodAutoscaler can be targeted at controller implementing scale subresource (the pod set is retrieved from the controller's ScaleStatus) or some well known controllers (e.g. for DaemonSet the pod set is read from the controller's spec). If VerticalPodAutoscaler cannot use specified target it will report ConfigUnsupported condition. Note that VerticalPodAutoscaler does not require full implementation of scale subresource - it will not use it to modify the replica count. The only thing retrieved is a label selector matching pods grouped by the target resource.
-    #[serde(rename = "targetRef")]
-    pub target_ref: VerticalPodAutoscalerTargetRef,
+    #[serde(rename = "targetRef", skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<VerticalPodAutoscalerTargetRef>,
     /// Describes the rules on how changes are applied to the pods. If not specified, all fields in the `PodUpdatePolicy` are set to their default values.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "updatePolicy")]
     pub update_policy: Option<VerticalPodAutoscalerUpdatePolicy>,
@@ -104,6 +104,12 @@ pub struct VerticalPodAutoscalerUpdatePolicy {
     pub update_mode: Option<VerticalPodAutoscalerUpdateMode>,
 }
 
+impl Default for VerticalPodAutoscalerUpdatePolicy {
+    fn default() -> Self {
+        Self { min_replicas: None, update_mode: Some(VerticalPodAutoscalerUpdateMode::Auto) }
+    }
+}
+
 /// Describes the rules on how changes are applied to the pods. If not specified, all fields in the `PodUpdatePolicy` are set to their default values.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub enum VerticalPodAutoscalerUpdateMode {
@@ -112,7 +118,6 @@ pub enum VerticalPodAutoscalerUpdateMode {
     Recreate,
     Auto,
 }
-
 /// Current information about the autoscaler.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct VerticalPodAutoscalerStatus {
@@ -170,4 +175,3 @@ pub struct VerticalPodAutoscalerStatusRecommendationContainerRecommendations {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "upperBound")]
     pub upper_bound: Option<BTreeMap<String, Quantity>>,
 }
-

@@ -5,7 +5,7 @@ use kube::api::{Patch, PatchParams};
 use kube::core::{DynamicObject, GroupVersionKind};
 use kube::discovery::ApiResource;
 use kube::Resource;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -36,11 +36,10 @@ struct Ctx {
     client: Client,
     gvks: Vec<GroupVersionKind>,
 }
-
 // Define the AutoVPA CRD struct
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(group = "autovpa.dev", version = "v1", kind = "AutoVPA", namespaced)]
-pub struct AutoVerticalScalerSpec {
+pub struct AutoVPASpec {
     selector: LabelSelector,
     vpa_template: VerticalPodAutoscalerTemplateSpec,
 }
@@ -50,6 +49,10 @@ pub struct VerticalPodAutoscalerTemplateSpec {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: Option<ObjectMeta>,
     template: VerticalPodAutoscalerSpec,
+}
+
+impl AutoVPA {
+    fn test(&self) {}
 }
 
 #[derive(Error, Debug)]
@@ -74,7 +77,9 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 // Define the main function
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
     let gvks = vec![
         GroupVersionKind::gvk("apps", "v1", "Deployment"),
         GroupVersionKind::gvk("apps", "v1", "StatefulSet"),
@@ -106,7 +111,6 @@ async fn main() -> anyhow::Result<()> {
                 // move |o: &dyn Metadata<Ty = ObjectMeta, Scope = ClusterResourceScope>| {
                 store
                     .find(|g| match &o.metadata.labels {
-                        
                         Some(labels) => utils::match_label(&g.spec.selector, &labels),
                         None => false,
                     })
@@ -131,8 +135,12 @@ async fn main() -> anyhow::Result<()> {
             error_policy,
             Arc::new(Ctx { client: client.clone(), gvks, gen_api, vpa_api }),
         )
-        //TODO err handling
-        .for_each(|_| futures::future::ready(()))
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!("reconciled: {:?}", o),
+                Err(err) => error!("reconcile {:?} failed!", err)
+            }
+        })
         .await;
     Ok(())
 }
@@ -177,7 +185,7 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                     ..obj.spec.vpa_template.metadata.clone().unwrap_or(Default::default())
                 },
                 spec: VerticalPodAutoscalerSpec {
-                    target_ref,
+                    target_ref: Some(target_ref),
                     ..obj.spec.vpa_template.template.clone()
                 },
             };
@@ -196,10 +204,76 @@ fn error_policy(_obj: Arc<AutoVPA>, _error: &Error, _ctx: Arc<Ctx>) -> Action {
 
 #[cfg(test)]
 mod test {
-    use crate::vpa::VerticalPodAutoscaler;
+    use std::collections::BTreeMap;
+
+    use k8s_openapi::apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector};
+    use kube::{Api, api::{PatchParams, Patch}};
+
+    use crate::{
+        vpa::{
+            ContainerControlledValues::{RequestsAndLimits, RequestsOnly},
+            ContainerPolicies, VerticalPodAutoscaler, VerticalPodAutoscalerResourcePolicy,
+            VerticalPodAutoscalerSpec, VerticalPodAutoscalerTargetRef,
+        },
+        AutoVPA,
+    };
 
     #[tokio::test]
-    async fn test_apply_vpa() {
+    async fn integration_test_apply_vpa(){
+        let client = kube::Client::try_default().await.unwrap();
+        let gen_api: Api<AutoVPA> = Api::namespaced(client.clone(), "default");
+
+        let auto_vpa = AutoVPA::new(
+            "test-vpa-gen",
+            crate::AutoVPASpec {
+                selector: LabelSelector {
+                    match_expressions: None,
+                    match_labels: Some(std::collections::BTreeMap::from([(
+                        "app".into(),
+                        "nginx".into(),
+                    )])),
+                },
+                vpa_template: crate::VerticalPodAutoscalerTemplateSpec {
+                    metadata: None,
+                    template: VerticalPodAutoscalerSpec {
+                        recommenders: None,
+                        target_ref: None, 
+                        // VerticalPodAutoscalerTargetRef {
+                        //     // api_version: Some("apps/v1".to_owned()),
+                        //     // kind: "Deployment".to_owned(),
+                        //     // name: "nginx-deployment".to_owned(),
+                        // },
+                        resource_policy: Some(VerticalPodAutoscalerResourcePolicy {
+                            container_policies: Some(vec![ContainerPolicies {
+                                container_name: Some("nginx".to_string()),
+                                controlled_resources: Some(vec!["cpu".into(), "memory".into()]),
+                                controlled_values: Some(RequestsAndLimits),
+                                max_allowed: Some(BTreeMap::from([(
+                                    "cpu".into(),
+                                    Quantity("2".into()),
+                                ),(
+                                    "memory".into(),
+                                    Quantity("2048Mi".into())
+                                )])),
+                                min_allowed: Some(BTreeMap::from([(
+                                    "cpu".into(),
+                                    Quantity("1".into()),
+                                ),(
+                                    "memory".into(),
+                                    Quantity("48Mi".into())
+                                )])),
+                                mode: None,
+                            }]),
+                        }),
+                        update_policy: Some(Default::default()),
+                    },
+                },
+            },
+        );
+        println!("{:?}", auto_vpa.clone());
+
+        gen_api.patch("test-vpa-gen", &PatchParams::apply("autovpa.dev"), &Patch::Apply(auto_vpa)).await.unwrap();
+
         let vpa_yaml = r"
         apiVersion: autoscaling.k8s.io/v1
         kind: VerticalPodAutoscaler
