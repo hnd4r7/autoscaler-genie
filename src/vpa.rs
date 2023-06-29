@@ -170,3 +170,4 @@ pub struct VerticalPodAutoscalerStatusRecommendationContainerRecommendations {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "upperBound")]
     pub upper_bound: Option<BTreeMap<String, Quantity>>,
 }
+

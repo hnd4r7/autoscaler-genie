@@ -1,5 +1,4 @@
-// mod admission_controller;mod vpa;
-mod vpa;
-mod autoscaler_genie;
+pub mod vpa;
+mod controller;
+pub use controller::*;
 mod utils;
-mod error;
