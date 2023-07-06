@@ -4,7 +4,7 @@ use futures::StreamExt;
 use kube::api::{Patch, PatchParams};
 use kube::core::{DynamicObject, GroupVersionKind};
 use kube::discovery::ApiResource;
-use kube::Resource;
+use kube::{Api, Resource, ResourceExt};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -17,7 +17,7 @@ use k8s_openapi::{
     apimachinery::pkg::apis::meta::v1::LabelSelector, apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
 use kube::{
-    api::{Api, ListParams},
+    api::ListParams,
     runtime::{
         controller::Action,
         reflector::{ObjectRef, Store},
@@ -31,8 +31,6 @@ use serde::{Deserialize, Serialize};
 use tracing::*;
 
 struct Ctx {
-    gen_api: Api<AutoVPA>,
-    vpa_api: Api<VerticalPodAutoscaler>,
     client: Client,
     gvks: Vec<GroupVersionKind>,
 }
@@ -51,10 +49,6 @@ pub struct VerticalPodAutoscalerTemplateSpec {
     template: VerticalPodAutoscalerSpec,
 }
 
-impl AutoVPA {
-    fn test(&self) {}
-}
-
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("LabelSelector is invalid: {0}")]
@@ -71,6 +65,13 @@ pub enum Error {
         #[from]
         source: kube::Error,
     },
+    #[error("Serde error: {source}")]
+    SerdeError {
+        #[from]
+        source: serde_yaml::Error,
+    },
+    // #[backtrace]
+    // backtrace: Backtrace,  // automatically detected
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -91,6 +92,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     //TODO: use namespaced api?
     let gen_api: Api<AutoVPA> = Api::all(client.clone());
+    let vpa_api: Api<VerticalPodAutoscaler> = Api::all(client.clone());
 
     // In sceniro of oam controlled contrllers, there is a oam.dev.namespace label in the generated deployment | statefulset...
     if let Err(e) = gen_api.list(&ListParams::default().limit(1)).await {
@@ -99,8 +101,12 @@ pub async fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // if let Err(e) = vpa_api.list(&ListParams::default().limit(1)).await {
+    //     error!("vpa crd is not querable; {e:?}, is the crd intalled?");
+    //     std::process::exit(1);
+    // }
+
     let mut controller = Controller::new(gen_api.clone(), Config::default());
-    let vpa_api: Api<VerticalPodAutoscaler> = Api::all(client.clone());
     let store = controller.store();
 
     for gvk in &gvks {
@@ -108,7 +114,6 @@ pub async fn run() -> anyhow::Result<()> {
         let dyn_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
         let dyn_mapper = |store: Store<AutoVPA>| {
             move |o: DynamicObject| {
-                // move |o: &dyn Metadata<Ty = ObjectMeta, Scope = ClusterResourceScope>| {
                 store
                     .find(|g| match &o.metadata.labels {
                         Some(labels) => utils::match_label(&g.spec.selector, &labels),
@@ -121,7 +126,6 @@ pub async fn run() -> anyhow::Result<()> {
         controller = controller.watches_with(
             dyn_api,
             api_resource,
-            // ApiResource::from_gvk(&GroupVersionKind::gvk("clux.dev", "v1", "Foo")),
             Config::default(),
             dyn_mapper(store.clone()),
         );
@@ -130,15 +134,11 @@ pub async fn run() -> anyhow::Result<()> {
     controller
         .owns(vpa_api.clone(), Config::default())
         .shutdown_on_signal()
-        .run(
-            reconciler,
-            error_policy,
-            Arc::new(Ctx { client: client.clone(), gvks, gen_api, vpa_api }),
-        )
+        .run(reconciler, error_policy, Arc::new(Ctx { client: client.clone(), gvks }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled: {:?}", o),
-                Err(err) => error!("reconcile {:?} failed!", err)
+                Err(err) => error!("reconcile failed: {}", err),
             }
         })
         .await;
@@ -178,9 +178,13 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
 
             let vpa_name = format!("{}-vpa", target_name.clone());
 
+            let target_namespace =
+                target.namespace().ok_or(Error::MissingObjectKey(".metadata.namespace"))?;
+
             let vpa = VerticalPodAutoscaler {
                 metadata: ObjectMeta {
                     name: Some(vpa_name.clone()),
+                    namespace: Some(target_namespace.clone()),
                     owner_references: Some(vec![oref.clone()]),
                     ..obj.spec.vpa_template.metadata.clone().unwrap_or(Default::default())
                 },
@@ -190,9 +194,18 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                 },
             };
 
-            ctx.vpa_api
+            let vpa_api: Api<VerticalPodAutoscaler> =
+                Api::namespaced(client.clone(), &target_namespace);
+
+            info!("apply vpa: {}", serde_yaml::to_string(&vpa)?);
+
+            match vpa_api
                 .patch(&vpa_name, &PatchParams::apply("autovpa.dev"), &Patch::Apply(&vpa))
-                .await?;
+                .await
+            {
+                Ok(_) => (),
+                Err(err) => error!("apply vpa failed: {}", err),
+            };
         }
     }
     Ok(Action::await_change())
@@ -206,24 +219,50 @@ fn error_policy(_obj: Arc<AutoVPA>, _error: &Error, _ctx: Arc<Ctx>) -> Action {
 mod test {
     use std::collections::BTreeMap;
 
+    use futures::{StreamExt, TryStreamExt};
     use k8s_openapi::apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector};
-    use kube::{Api, api::{PatchParams, Patch}};
+    use kube::{
+        api::{Patch, PatchParams},
+        core::watch,
+        runtime::{watcher, WatchStreamExt},
+        Api,
+    };
 
     use crate::{
         vpa::{
-            ContainerControlledValues::{RequestsAndLimits, RequestsOnly},
-            ContainerPolicies, VerticalPodAutoscaler, VerticalPodAutoscalerResourcePolicy,
-            VerticalPodAutoscalerSpec, VerticalPodAutoscalerTargetRef,
+            ContainerControlledValues::RequestsAndLimits, ContainerPolicies, VerticalPodAutoscaler,
+            VerticalPodAutoscalerResourcePolicy, VerticalPodAutoscalerSpec,
         },
         AutoVPA,
     };
 
     #[tokio::test]
-    async fn integration_test_apply_vpa(){
+    async fn integration_test_apply_vpa() -> anyhow::Result<()> {
         let client = kube::Client::try_default().await.unwrap();
         let gen_api: Api<AutoVPA> = Api::namespaced(client.clone(), "default");
+        let auto_vpa = get_test_vpa_gen();
+        println!("{:?}", auto_vpa.clone());
+        gen_api
+            .patch("test-vpa-gen", &PatchParams::apply("autovpa.dev"), &Patch::Apply(auto_vpa))
+            .await
+            .unwrap();
 
-        let auto_vpa = AutoVPA::new(
+        kube::runtime::watcher(gen_api, watcher::Config::default())
+            .applied_objects()
+            .try_for_each(|g| async move {
+                println!("watched auto-vpa : {:?}", g);
+                Ok(())
+            })
+            .await?;
+
+        let vpa = get_test_vpa();
+        dbg!(vpa);
+
+        Ok(())
+    }
+
+    fn get_test_vpa_gen() -> AutoVPA {
+        AutoVPA::new(
             "test-vpa-gen",
             crate::AutoVPASpec {
                 selector: LabelSelector {
@@ -237,7 +276,7 @@ mod test {
                     metadata: None,
                     template: VerticalPodAutoscalerSpec {
                         recommenders: None,
-                        target_ref: None, 
+                        target_ref: None,
                         // VerticalPodAutoscalerTargetRef {
                         //     // api_version: Some("apps/v1".to_owned()),
                         //     // kind: "Deployment".to_owned(),
@@ -248,20 +287,14 @@ mod test {
                                 container_name: Some("nginx".to_string()),
                                 controlled_resources: Some(vec!["cpu".into(), "memory".into()]),
                                 controlled_values: Some(RequestsAndLimits),
-                                max_allowed: Some(BTreeMap::from([(
-                                    "cpu".into(),
-                                    Quantity("2".into()),
-                                ),(
-                                    "memory".into(),
-                                    Quantity("2048Mi".into())
-                                )])),
-                                min_allowed: Some(BTreeMap::from([(
-                                    "cpu".into(),
-                                    Quantity("1".into()),
-                                ),(
-                                    "memory".into(),
-                                    Quantity("48Mi".into())
-                                )])),
+                                max_allowed: Some(BTreeMap::from([
+                                    ("cpu".into(), Quantity("2".into())),
+                                    ("memory".into(), Quantity("2048Mi".into())),
+                                ])),
+                                min_allowed: Some(BTreeMap::from([
+                                    ("cpu".into(), Quantity("1".into())),
+                                    ("memory".into(), Quantity("48Mi".into())),
+                                ])),
                                 mode: None,
                             }]),
                         }),
@@ -269,11 +302,10 @@ mod test {
                     },
                 },
             },
-        );
-        println!("{:?}", auto_vpa.clone());
+        )
+    }
 
-        gen_api.patch("test-vpa-gen", &PatchParams::apply("autovpa.dev"), &Patch::Apply(auto_vpa)).await.unwrap();
-
+    fn get_test_vpa() -> VerticalPodAutoscaler {
         let vpa_yaml = r"
         apiVersion: autoscaling.k8s.io/v1
         kind: VerticalPodAutoscaler
@@ -302,8 +334,6 @@ mod test {
           updatePolicy:
             updateMode: Auto
         ";
-        let vpa: VerticalPodAutoscaler =
-            serde_yaml::from_str(vpa_yaml).expect("illegal input vpa yaml");
-        dbg!(vpa);
+        serde_yaml::from_str(vpa_yaml).expect("illegal input vpa yaml")
     }
 }

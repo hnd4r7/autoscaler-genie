@@ -175,3 +175,65 @@ pub struct VerticalPodAutoscalerStatusRecommendationContainerRecommendations {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "upperBound")]
     pub upper_bound: Option<BTreeMap<String, Quantity>>,
 }
+
+mod test {
+    use anyhow::Ok;
+    use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::api::resource::Quantity};
+    use kube::{
+        api::{Patch, PatchParams},
+        core::ObjectList,
+        Api,
+    };
+
+    use super::VerticalPodAutoscaler;
+
+    #[tokio::test]
+    async fn apply_vpa() -> anyhow::Result<()> {
+        let vpa_yaml = r"
+        apiVersion: autoscaling.k8s.io/v1
+        kind: VerticalPodAutoscaler
+        metadata:
+          name: nginx-deployment-vpa
+          namespace: default
+          ownerReferences:
+          - apiVersion: autovpa.dev/v1
+            controller: true
+            kind: AutoVPA
+            name: test-vpa-gen
+            uid: 6acf7614-e0de-492e-b4a5-77a51ef27c92
+        spec:
+          resourcePolicy:
+            containerPolicies:
+            - containerName: nginx
+              controlledResources:
+              - cpu
+              - memory
+              controlledValues: RequestsAndLimits
+              maxAllowed:
+                cpu: '2'
+                memory: 2048Mi
+              minAllowed:
+                cpu: '1'
+                memory: 48Mi
+          targetRef:
+            apiVersion: apps/v1
+            kind: Deployment
+            name: nginx-deployment
+          updatePolicy:
+            updateMode: Auto";
+        let vpa: VerticalPodAutoscaler =
+            serde_yaml::from_str(vpa_yaml).expect("failed to parse vpa yaml");
+        let client = kube::Client::try_default().await?;
+        let api: Api<VerticalPodAutoscaler> = Api::default_namespaced(client.clone());
+        api.patch(vpa.metadata.name.as_ref().unwrap(), &PatchParams::apply("lwp.se"), &Patch::Apply(&vpa)).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_quantity() -> anyhow::Result<()> {
+        let s = r#"{"cpu":2,"memory":"2048Mi"}"#;
+        let m: std::collections::BTreeMap<String, Quantity> = serde_json::from_str(s)?;
+        println!("{:?}", m);
+        Ok(())
+    }
+}
