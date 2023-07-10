@@ -1,16 +1,18 @@
-use crate::utils::convert_label_selector_to_query_string;
+use crate::utils::{convert_label_selector_to_query_string, self};
 use crate::vpa::VerticalPodAutoscalerTargetRef;
 use futures::StreamExt;
 use kube::api::{Patch, PatchParams};
 use kube::core::{DynamicObject, GroupVersionKind};
 use kube::discovery::ApiResource;
+use kube::runtime::Controller;
+use kube::runtime::reflector::{Store, ObjectRef};
+use kube::runtime::watcher::Config;
 use kube::{Api, Resource, ResourceExt};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
 use crate::{
-    utils,
     vpa::{VerticalPodAutoscaler, VerticalPodAutoscalerSpec},
 };
 use k8s_openapi::{
@@ -20,9 +22,6 @@ use kube::{
     api::ListParams,
     runtime::{
         controller::Action,
-        reflector::{ObjectRef, Store},
-        watcher::Config,
-        Controller,
     },
     Client, CustomResource,
 };
@@ -37,9 +36,16 @@ struct Ctx {
 // Define the AutoVPA CRD struct
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[kube(group = "autovpa.dev", version = "v1", kind = "AutoVPA", namespaced)]
+#[kube(status = "AutoVPAStatus")]
+#[kube(printcolumn = r#"{"name":"matched", "jsonPath": ".status.matched", "type": "integer"}"#)]
 pub struct AutoVPASpec {
     selector: LabelSelector,
     vpa_template: VerticalPodAutoscalerTemplateSpec,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
+pub struct AutoVPAStatus {
+    matched: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -76,8 +82,6 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-// Define the main function
-#[tokio::main]
 pub async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -96,13 +100,16 @@ pub async fn run() -> anyhow::Result<()> {
 
     // In sceniro of oam controlled contrllers, there is a oam.dev.namespace label in the generated deployment | statefulset...
     if let Err(e) = gen_api.list(&ListParams::default().limit(1)).await {
-        error!("autovpa crd is not querable; {e:?}, is the crd intalled?");
+        error!(
+            "autovpa crd is not querable; {:?}, is the crd intalled?",
+            &e as &dyn std::error::Error
+        );
         info!("Installation: cargo run --bin crdgen | kubectl apply -f");
         std::process::exit(1);
     }
 
     // if let Err(e) = vpa_api.list(&ListParams::default().limit(1)).await {
-    //     error!("vpa crd is not querable; {e:?}, is the crd intalled?");
+    //     error!("vpa crd is not querable; {:?}, is the crd intalled?", &e as &dyn std::error::Error);
     //     std::process::exit(1);
     // }
 
@@ -116,7 +123,7 @@ pub async fn run() -> anyhow::Result<()> {
             move |o: DynamicObject| {
                 store
                     .find(|g| match &o.metadata.labels {
-                        Some(labels) => utils::match_label(&g.spec.selector, &labels),
+                        Some(labels) => utils::match_label(&g.spec.selector, labels),
                         None => false,
                     })
                     .map(|g| ObjectRef::from_obj(&*g))
@@ -138,7 +145,10 @@ pub async fn run() -> anyhow::Result<()> {
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled: {:?}", o),
-                Err(err) => error!("reconcile failed: {}", err),
+                // Err(err) => error!("reconcile failed: {}", report_error(&err)),
+                Err(err) => {
+                    error!(error = &err as &dyn std::error::Error, "Failed to reconcile object")
+                }
             }
         })
         .await;
@@ -151,6 +161,7 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
 
     let oref = obj.controller_owner_ref(&()).ok_or(Error::InvalidOwnerRef())?;
 
+    let mut matched = 0;
     for gvk in &ctx.gvks {
         let api_resource = ApiResource::from_gvk(gvk);
         let dyn_api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
@@ -197,8 +208,6 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
             let vpa_api: Api<VerticalPodAutoscaler> =
                 Api::namespaced(client.clone(), &target_namespace);
 
-            info!("apply vpa: {}", serde_yaml::to_string(&vpa)?);
-
             match vpa_api
                 .patch(&vpa_name, &PatchParams::apply("autovpa.dev"), &Patch::Apply(&vpa))
                 .await
@@ -206,8 +215,19 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                 Ok(_) => (),
                 Err(err) => error!("apply vpa failed: {}", err),
             };
+            matched += 1;
         }
     }
+
+    let api: Api<AutoVPA> = Api::namespaced(
+        client.clone(),
+        &obj.namespace().ok_or(Error::MissingObjectKey(".metadata.namespace"))?,
+    );
+
+    let status = serde_json::json!({"status": AutoVPAStatus { matched }});
+    api.patch_status(&obj.name_any(), &Default::default(), &Patch::Merge(status))
+        .await?;
+
     Ok(Action::await_change())
 }
 
@@ -219,11 +239,10 @@ fn error_policy(_obj: Arc<AutoVPA>, _error: &Error, _ctx: Arc<Ctx>) -> Action {
 mod test {
     use std::collections::BTreeMap;
 
-    use futures::{StreamExt, TryStreamExt};
+    use futures::TryStreamExt;
     use k8s_openapi::apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector};
     use kube::{
         api::{Patch, PatchParams},
-        core::watch,
         runtime::{watcher, WatchStreamExt},
         Api,
     };
@@ -241,7 +260,7 @@ mod test {
         let client = kube::Client::try_default().await.unwrap();
         let gen_api: Api<AutoVPA> = Api::namespaced(client.clone(), "default");
         let auto_vpa = get_test_vpa_gen();
-        println!("{:?}", auto_vpa.clone());
+        // println!("{:?}", auto_vpa.clone());
         gen_api
             .patch("test-vpa-gen", &PatchParams::apply("autovpa.dev"), &Patch::Apply(auto_vpa))
             .await
@@ -322,10 +341,10 @@ mod test {
               - memory
               controlledValues: RequestsAndLimits
               maxAllowed:
-                cpu: 2
+                cpu: '2'
                 memory: 2048Mi
               minAllowed:
-                cpu: 1
+                cpu: '1'
                 memory: 48Mi
           targetRef:
             apiVersion: apps/v1

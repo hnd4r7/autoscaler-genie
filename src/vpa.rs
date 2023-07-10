@@ -176,16 +176,10 @@ pub struct VerticalPodAutoscalerStatusRecommendationContainerRecommendations {
     pub upper_bound: Option<BTreeMap<String, Quantity>>,
 }
 
-mod test {
-    use anyhow::Ok;
-    use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::api::resource::Quantity};
-    use kube::{
-        api::{Patch, PatchParams},
-        core::ObjectList,
-        Api,
-    };
-
-    use super::VerticalPodAutoscaler;
+#[cfg(test)]
+mod tests {
+    use kube::{Api, api::{PatchParams, Patch}};
+    use crate::vpa::VerticalPodAutoscaler;
 
     #[tokio::test]
     async fn apply_vpa() -> anyhow::Result<()> {
@@ -225,15 +219,12 @@ mod test {
             serde_yaml::from_str(vpa_yaml).expect("failed to parse vpa yaml");
         let client = kube::Client::try_default().await?;
         let api: Api<VerticalPodAutoscaler> = Api::default_namespaced(client.clone());
-        api.patch(vpa.metadata.name.as_ref().unwrap(), &PatchParams::apply("lwp.se"), &Patch::Apply(&vpa)).await?;
-        Ok(())
-    }
-
-    #[test]
-    fn serialize_quantity() -> anyhow::Result<()> {
-        let s = r#"{"cpu":2,"memory":"2048Mi"}"#;
-        let m: std::collections::BTreeMap<String, Quantity> = serde_json::from_str(s)?;
-        println!("{:?}", m);
+        api.patch(
+            vpa.metadata.name.as_ref().unwrap(),
+            &PatchParams::apply("lwp.se"),
+            &Patch::Apply(&vpa),
+        )
+        .await?;
         Ok(())
     }
 }

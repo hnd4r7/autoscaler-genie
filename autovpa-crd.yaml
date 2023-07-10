@@ -12,7 +12,10 @@ spec:
     singular: autovpa
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .status.matched
+      name: matched
+      type: integer
     name: v1
     schema:
       openAPIV3Schema:
@@ -297,10 +300,20 @@ spec:
             - selector
             - vpa_template
             type: object
+          status:
+            nullable: true
+            properties:
+              matched:
+                format: int32
+                type: integer
+            required:
+            - matched
+            type: object
         required:
         - spec
         title: AutoVPA
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}
