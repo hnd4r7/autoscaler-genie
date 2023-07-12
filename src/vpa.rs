@@ -178,8 +178,11 @@ pub struct VerticalPodAutoscalerStatusRecommendationContainerRecommendations {
 
 #[cfg(test)]
 mod tests {
-    use kube::{Api, api::{PatchParams, Patch}};
     use crate::vpa::VerticalPodAutoscaler;
+    use kube::{
+        api::{Patch, PatchParams},
+        Api,
+    };
 
     #[tokio::test]
     async fn apply_vpa() -> anyhow::Result<()> {

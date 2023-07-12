@@ -1,0 +1,38 @@
+replicaCount: 1
+nameOverride: ""
+namespace: "kube-system"
+
+image:
+  repository: hnd4r7/autoscaler-genie
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  annotations: {}
+podAnnotations: {}
+  # prometheus.io/scrape: "true"
+  # prometheus.io/port: "8080"
+
+podSecurityContext: {}
+  # fsGroup: 2000
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 100Mi
+
+# TODO: evar option for otel
+# TODO: how to select between otel and non otel?
+# TODO: metrics scraping?

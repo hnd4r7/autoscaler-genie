@@ -1,7 +1,7 @@
+use crate::controller::Error;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use std::collections::BTreeMap;
 use tracing::error;
-use crate::controller::Error;
 
 pub fn match_label(selector: &LabelSelector, labels: &BTreeMap<String, String>) -> bool {
     if labels.is_empty() {

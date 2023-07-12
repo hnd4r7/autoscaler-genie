@@ -1,30 +1,23 @@
-use crate::utils::{convert_label_selector_to_query_string, self};
+use crate::utils::{self, convert_label_selector_to_query_string};
 use crate::vpa::VerticalPodAutoscalerTargetRef;
 use futures::StreamExt;
 use kube::api::{Patch, PatchParams};
 use kube::core::{DynamicObject, GroupVersionKind};
 use kube::discovery::ApiResource;
-use kube::runtime::Controller;
-use kube::runtime::reflector::{Store, ObjectRef};
+use kube::runtime::reflector::{ObjectRef, Store};
 use kube::runtime::watcher::Config;
+use kube::runtime::Controller;
 use kube::{Api, Resource, ResourceExt};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tracing_subscriber::{prelude::*, EnvFilter, Registry};
 
-use crate::{
-    vpa::{VerticalPodAutoscaler, VerticalPodAutoscalerSpec},
-};
+use crate::vpa::{VerticalPodAutoscaler, VerticalPodAutoscalerSpec};
 use k8s_openapi::{
     apimachinery::pkg::apis::meta::v1::LabelSelector, apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
-use kube::{
-    api::ListParams,
-    runtime::{
-        controller::Action,
-    },
-    Client, CustomResource,
-};
+use kube::{api::ListParams, runtime::controller::Action, Client, CustomResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::*;
@@ -82,8 +75,17 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
+pub fn init_logging() {
+    let logger = tracing_subscriber::fmt::layer().compact();
+    let env_filter =
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info")).unwrap();
+    let collector = Registry::default().with(logger).with(env_filter);
+    // Initialize tracing
+    tracing::subscriber::set_global_default(collector).unwrap();
+}
+
 pub async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     let gvks = vec![
         GroupVersionKind::gvk("apps", "v1", "Deployment"),
@@ -108,10 +110,10 @@ pub async fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // if let Err(e) = vpa_api.list(&ListParams::default().limit(1)).await {
-    //     error!("vpa crd is not querable; {:?}, is the crd intalled?", &e as &dyn std::error::Error);
-    //     std::process::exit(1);
-    // }
+    if let Err(e) = vpa_api.list(&ListParams::default().limit(1)).await {
+        error!("vpa crd is not querable; {:?}, is the crd intalled?", &e as &dyn std::error::Error);
+        std::process::exit(1);
+    }
 
     let mut controller = Controller::new(gen_api.clone(), Config::default());
     let store = controller.store();
@@ -145,7 +147,6 @@ pub async fn run() -> anyhow::Result<()> {
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled: {:?}", o),
-                // Err(err) => error!("reconcile failed: {}", report_error(&err)),
                 Err(err) => {
                     error!(error = &err as &dyn std::error::Error, "Failed to reconcile object")
                 }
@@ -225,8 +226,7 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     );
 
     let status = serde_json::json!({"status": AutoVPAStatus { matched }});
-    api.patch_status(&obj.name_any(), &Default::default(), &Patch::Merge(status))
-        .await?;
+    api.patch_status(&obj.name_any(), &Default::default(), &Patch::Merge(status)).await?;
 
     Ok(Action::await_change())
 }
@@ -256,6 +256,7 @@ mod test {
     };
 
     #[tokio::test]
+    #[ignore="use k8s current-context"]
     async fn integration_test_apply_vpa() -> anyhow::Result<()> {
         let client = kube::Client::try_default().await.unwrap();
         let gen_api: Api<AutoVPA> = Api::namespaced(client.clone(), "default");

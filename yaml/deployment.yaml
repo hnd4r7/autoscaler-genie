@@ -1,0 +1,97 @@
+---
+# Source: autoscaler-genie/templates/rbac.yaml
+# Scoped service account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: autoscaler-genie
+  labels:
+    app: autoscaler-genie
+    app.kubernetes.io/name: autoscaler-genie
+    app.kubernetes.io/version: "0.1.0"
+  namespace: kube-system
+automountServiceAccountToken: true
+---
+# Source: autoscaler-genie/templates/rbac.yaml
+# Access for the service account
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: autoscaler-genie
+rules:
+  - apiGroups: ["autovpa.dev"]
+    resources: ["autovpas", "autovpas/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers", "verticalpodautoscalers/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jobs"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: autoscaler-genie/templates/rbac.yaml
+# Binding the role to the account
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: autoscaler-genie
+subjects:
+- kind: ServiceAccount
+  namespace: kube-system
+  name: autoscaler-genie
+roleRef:
+  kind: ClusterRole
+  name: autoscaler-genie
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: autoscaler-genie/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autoscaler-genie
+  namespace: kube-system
+  labels:
+    app: autoscaler-genie
+    app.kubernetes.io/name: autoscaler-genie
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autoscaler-genie
+  template:
+    metadata:
+      labels:
+        app: autoscaler-genie
+      annotations:
+        kubectl.kubernetes.io/default-container: autoscaler-genie
+    spec:
+      serviceAccountName: autoscaler-genie
+      securityContext:
+        {}
+      containers:
+      - name: autoscaler-genie
+        image: "harborsml.tsign.cn/common/autoscaler-genie:0.1.0"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          {}
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        env:
+        # We are pointing to tempo or grafana tracing agent's otlp grpc receiver port
+        - name: RUST_LOG
+          value: "info,kube=debug,controller=debug"
