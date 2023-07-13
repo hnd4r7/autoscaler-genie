@@ -2,14 +2,17 @@
 default:
   @just --list --unsorted
 
+generate:
+  cargo run --bin crdgen > yaml/crd.yaml
+  helm template charts/autoscaler-genie > yaml/deployment.yaml
+
 # install crd into the cluster
 install-crd: generate
   kubectl apply -f yaml/crd.yaml
 
-generate:
-  cargo run --bin crdgen > yaml/crd.yaml
-  helm template charts/autoscaler-genie > yaml/deployment.yaml
-# run without opentelemetry
+apply: generate
+  kubectl apply -f yaml
+
 run:
   RUST_LOG=info,kube=debug,autoscaler-genie=debug cargo run
 
@@ -20,6 +23,7 @@ fmt:
 # run unit tests
 test-unit:
   cargo test
+  
 # run integration tests
 test-integration: install-crd
   cargo test -- --ignored

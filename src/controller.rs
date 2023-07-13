@@ -28,7 +28,7 @@ struct Ctx {
 }
 // Define the AutoVPA CRD struct
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[kube(group = "autovpa.dev", version = "v1", kind = "AutoVPA", namespaced)]
+#[kube(group = "autovpa.dev", version = "v1", kind = "AutoVPA")]
 #[kube(status = "AutoVPAStatus")]
 #[kube(printcolumn = r#"{"name":"matched", "jsonPath": ".status.matched", "type": "integer"}"#)]
 pub struct AutoVPASpec {
@@ -96,7 +96,6 @@ pub async fn run() -> anyhow::Result<()> {
 
     let client = Client::try_default().await.expect("failed to create kube client");
 
-    //TODO: use namespaced api?
     let gen_api: Api<AutoVPA> = Api::all(client.clone());
     let vpa_api: Api<VerticalPodAutoscaler> = Api::all(client.clone());
 
@@ -125,10 +124,25 @@ pub async fn run() -> anyhow::Result<()> {
             move |o: DynamicObject| {
                 store
                     .find(|g| match &o.metadata.labels {
-                        Some(labels) => utils::match_label(&g.spec.selector, labels),
+                        Some(labels) => {
+                            let b = utils::match_label(&g.spec.selector, labels);
+                            if b {
+                                println!(
+                                    "g selector {:?} match {:?} return {:?}",
+                                    g.spec.selector, o.metadata.name, b
+                                );
+                            }
+                            b
+                        }
                         None => false,
                     })
-                    .map(|g| ObjectRef::from_obj(&*g))
+                    .map(|g| {
+                        let objref = ObjectRef::from_obj(&*g);
+                        println!("matched obj: {:?}", o.metadata.name);
+                        println!("matched autovpa: {:?}", g.metadata.name);
+                        println!("matched obj ref: {:?}, ns: {:?}", objref.name, objref.namespace);
+                        objref
+                    })
             }
         };
 
@@ -220,10 +234,7 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
         }
     }
 
-    let api: Api<AutoVPA> = Api::namespaced(
-        client.clone(),
-        &obj.namespace().ok_or(Error::MissingObjectKey(".metadata.namespace"))?,
-    );
+    let api: Api<AutoVPA> = Api::all(client.clone());
 
     let status = serde_json::json!({"status": AutoVPAStatus { matched }});
     api.patch_status(&obj.name_any(), &Default::default(), &Patch::Merge(status)).await?;
@@ -256,10 +267,10 @@ mod test {
     };
 
     #[tokio::test]
-    #[ignore="use k8s current-context"]
+    #[ignore = "use k8s current-context"]
     async fn integration_test_apply_vpa() -> anyhow::Result<()> {
         let client = kube::Client::try_default().await.unwrap();
-        let gen_api: Api<AutoVPA> = Api::namespaced(client.clone(), "default");
+        let gen_api: Api<AutoVPA> = Api::all(client.clone());
         let auto_vpa = get_test_vpa_gen();
         // println!("{:?}", auto_vpa.clone());
         gen_api

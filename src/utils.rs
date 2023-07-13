@@ -7,6 +7,18 @@ pub fn match_label(selector: &LabelSelector, labels: &BTreeMap<String, String>) 
     if labels.is_empty() {
         return false;
     }
+    if let Some(match_labels) = &selector.match_labels {
+        for (k, v) in labels {
+            match match_labels.get(k) {
+                None => return false,
+                Some(x) => {
+                    if x != v {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
     for exp in selector.match_expressions.iter().flatten() {
         let matched = match exp.operator.as_str() {
             "IN" => labels
@@ -26,6 +38,9 @@ pub fn match_label(selector: &LabelSelector, labels: &BTreeMap<String, String>) 
             return false;
         }
     }
+
+    // for labels in selector.match_labels.map(|t|t.contains_key("")) {
+    // }
     true
 }
 
@@ -111,4 +126,23 @@ pub fn convert_label_selector_to_query_string(
     };
 
     Ok(query_string)
+}
+
+mod test {
+    use std::collections::BTreeMap;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+    use crate::utils::match_label;
+
+    #[test]
+    fn test_match_labels() {
+        let selector = LabelSelector {
+            match_labels: Some(std::collections::BTreeMap::from([("app".into(), "lll".into())])),
+            ..Default::default()
+        };
+        let labels = BTreeMap::from([("app".to_string(), "lll".to_string())]);
+        assert!(match_label(&selector, &labels));
+
+        let labels = BTreeMap::from([("app".to_string(), "ll".to_string())]);
+        assert!(!match_label(&selector, &labels));
+    }
 }

@@ -10,7 +10,7 @@ spec:
     plural: autovpas
     shortNames: []
     singular: autovpa
-  scope: Namespaced
+  scope: Cluster
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.matched
