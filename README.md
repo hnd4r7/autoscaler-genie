@@ -7,52 +7,77 @@ With Autoscaler-Genie, you can simplify the process of creating and managing VPA
 ## Features
 
 - Automatically generates VPA resources for your Kubernetes workloads.
-- Adjusts resource requests and limits based on container resource usage.
 - Simplifies the management of VPAs by automating the creation process.
 
-## Getting Started
 
-### Prerequisites
+## Prerequisites
 
 To use Autoscaler-Genie, you need:
 
-- Kubernetes cluster (version X.X or higher)
+- Kubernetes cluster
 - Kubernetes configuration (Kubeconfig) set up to access your cluster
 
-### Installation
+## Installation
 
 1. Clone the Autoscaler-Genie repository:
 
    ```shell
    git clone https://github.com/your-username/autoscaler-genie.git
    ```
+
 2. Build the Autoscaler-Genie binary:
+
 ```
 cd autoscaler-genie
-make build
+just generate
+```
+3. apply crd and necessary RBAC permission YAML manifests to your cluster
+```
+just apply
 ```
 
 ### Usage
 
-Set up the necessary RBAC permissions for Autoscaler-Genie to access and modify resources in your cluster. Example YAML manifests for RBAC are provided in the rbac directory.
-```
-kubectl apply -f rbac/autoscaler-genie-rbac.yaml
-```
-Create a configuration file describing your workloads and their desired VPA settings. Example configuration files are provided in the examples directory.
+Autoscaler-genie generates Vertical Pod Autoscaler (VPA)  for your Kubernetes workloads based on specified selectors. It now supports matching workloads by label or by namespace. You can specify the VPA template you want. 
 
-```shell
-cp examples/workload-config.yaml my-workload-config.yaml
+When applied, it will generate the necessary VPA resources and apply them to your cluster. The AutoVpa CRD will also display the total number of matched workloads and the generated VPAs
+
+For example:
+```yaml
+apiVersion: autovpa.dev/v1
+kind: AutoVPA
+metadata:
+  name: test-vpa-gen
+spec:
+  namespaceSelector:
+  - kube-system
+  objectSelector:
+    matchLabels:
+      app: nginx
+  vpa_template:
+    metadata: null
+    template:
+      resourcePolicy:
+        containerPolicies:
+        - containerName: "*"
+          controlledResources:
+          - cpu
+          - memory
+          controlledValues: RequestsAndLimits
+          maxAllowed:
+            cpu: "2"
+            memory: 2048Mi
+          minAllowed:
+            cpu: "1"
+            memory: 48Mi
+      updatePolicy:
+        updateMode: Auto
 ```
-Edit my-workload-config.yaml to specify your workload details and desired VPA settings.
-Run Autoscaler-Genie to generate and apply VPAs for your workloads:
-```shell
-./autoscaler-genie --config my-workload-config.yaml
-```
-Autoscaler-Genie will read your workload configuration file, generate the necessary VPA resources, and apply them to your cluster.
+
+This will generate vpa for all the workload(`Deployment\StatefulSet\Daemonset\Job`) with label `app=nginx` within the `kube-system` namespace
 
 ### Contributing
 Contributions to Autoscaler-Genie are welcome! If you find a bug, have a feature request, or want to contribute code, please follow our contribution guidelines outlined in the CONTRIBUTING.md file.
 
 ### License
 Autoscaler-Genie is released under the MIT License.
-Feel free to customize the README template to provide more specific information about your Autoscaler

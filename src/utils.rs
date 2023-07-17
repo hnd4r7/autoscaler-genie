@@ -1,15 +1,13 @@
 use crate::controller::Error;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
 use std::collections::BTreeMap;
 use tracing::error;
 
+// Refer to: LabelSelectorAsSelector: https://github.com/kubernetes/kubernetes/blob/master/vendor/k8s.io/apimachinery/pkg/apis/meta/v1/helpers.go#L34
 pub fn match_label(selector: &LabelSelector, labels: &BTreeMap<String, String>) -> bool {
-    if labels.is_empty() {
-        return false;
-    }
     if let Some(match_labels) = &selector.match_labels {
-        for (k, v) in labels {
-            match match_labels.get(k) {
+        for (k, v) in match_labels {
+            match labels.get(k) {
                 None => return false,
                 Some(x) => {
                     if x != v {

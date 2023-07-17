@@ -80,8 +80,8 @@ spec:
         {}
       containers:
       - name: autoscaler-genie
-        image: "harborsml.tsign.cn/common/autoscaler-genie:0.1.0"
-        imagePullPolicy: IfNotPresent
+        image: "hnd4r7/autoscaler-genie:0.1.0"
+        imagePullPolicy: Always
         securityContext:
           {}
         resources:

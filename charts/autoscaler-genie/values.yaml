@@ -4,7 +4,7 @@ namespace: "kube-system"
 
 image:
   repository: hnd4r7/autoscaler-genie
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
   tag: ""
 
 imagePullSecrets: []

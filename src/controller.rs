@@ -31,8 +31,10 @@ struct Ctx {
 #[kube(group = "autovpa.dev", version = "v1", kind = "AutoVPA")]
 #[kube(status = "AutoVPAStatus")]
 #[kube(printcolumn = r#"{"name":"matched", "jsonPath": ".status.matched", "type": "integer"}"#)]
+#[serde(rename_all = "camelCase")]
 pub struct AutoVPASpec {
-    selector: LabelSelector,
+    namespace_selector: Option<Vec<String>>,
+    object_selector: Option<LabelSelector>,
     vpa_template: VerticalPodAutoscalerTemplateSpec,
 }
 
@@ -123,26 +125,25 @@ pub async fn run() -> anyhow::Result<()> {
         let dyn_mapper = |store: Store<AutoVPA>| {
             move |o: DynamicObject| {
                 store
-                    .find(|g| match &o.metadata.labels {
-                        Some(labels) => {
-                            let b = utils::match_label(&g.spec.selector, labels);
-                            if b {
-                                println!(
-                                    "g selector {:?} match {:?} return {:?}",
-                                    g.spec.selector, o.metadata.name, b
-                                );
-                            }
-                            b
+                    .find(|g| {
+                        let match_namespace = g.spec.namespace_selector.as_ref().map_or(true, |mn| {
+                                o.namespace().map_or(false, |os| mn.contains(&os))
+                            });
+                        if !match_namespace {
+                            return false
                         }
-                        None => false,
+                        // select "Nothing" when selector is none, select "Everything" when selector is empty struct.
+                        // ref: https://github.com/kubernetes/kubernetes/blob/master/vendor/k8s.io/apimachinery/pkg/apis/meta/v1/helpers.go#L36
+                        let match_labels = g.spec.object_selector.as_ref().map_or(false, |ml| {
+                            o.metadata.labels.as_ref().map_or(true, |ls| utils::match_label(ml, ls))
+                        });
+                        debug!(
+                            "g selector {:?} match {:?} return {:?}",
+                            g.spec.object_selector, o.metadata.name, match_labels
+                        );
+                        match_labels
                     })
-                    .map(|g| {
-                        let objref = ObjectRef::from_obj(&*g);
-                        println!("matched obj: {:?}", o.metadata.name);
-                        println!("matched autovpa: {:?}", g.metadata.name);
-                        println!("matched obj ref: {:?}, ns: {:?}", objref.name, objref.namespace);
-                        objref
-                    })
+                    .map(|g|ObjectRef::from_obj(&*g))
             }
         };
 
@@ -172,7 +173,11 @@ pub async fn run() -> anyhow::Result<()> {
 
 async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let client = ctx.client.clone();
-    let label_selector_query = convert_label_selector_to_query_string(&obj.spec.selector)?;
+    let label_selector_query = if let Some(selector) = &obj.spec.object_selector {
+        Some(convert_label_selector_to_query_string(selector)?)
+    } else {
+        None
+    };
 
     let oref = obj.controller_owner_ref(&()).ok_or(Error::InvalidOwnerRef())?;
 
@@ -183,7 +188,7 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
 
         let targets = dyn_api
             .list(&ListParams {
-                label_selector: Some(label_selector_query.clone()),
+                label_selector: label_selector_query.clone(),
                 ..Default::default()
             })
             .await?
@@ -196,6 +201,17 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                 .clone()
                 .ok_or_else(|| Error::MissingObjectKey(".metadata.name"))?;
 
+            let target_namespace =
+                target.namespace().ok_or(Error::MissingObjectKey(".metadata.namespace"))?;
+
+            match &obj.spec.namespace_selector {
+                Some(ns) => if !ns.contains(&target_namespace.clone()){
+                    debug!("skip obj with namespace: {}", target_namespace.clone());
+                    continue
+                },
+                _ => ()
+            }
+
             let target_ref = VerticalPodAutoscalerTargetRef {
                 api_version: Some(gvk.api_version()),
                 kind: gvk.kind.clone(),
@@ -204,8 +220,6 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
 
             let vpa_name = format!("{}-vpa", target_name.clone());
 
-            let target_namespace =
-                target.namespace().ok_or(Error::MissingObjectKey(".metadata.namespace"))?;
 
             let vpa = VerticalPodAutoscaler {
                 metadata: ObjectMeta {
@@ -227,7 +241,7 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                 .patch(&vpa_name, &PatchParams::apply("autovpa.dev"), &Patch::Apply(&vpa))
                 .await
             {
-                Ok(_) => (),
+                Ok(_) => info!("apply vpa {} successfully", vpa_name),
                 Err(err) => error!("apply vpa failed: {}", err),
             };
             matched += 1;
@@ -248,17 +262,22 @@ fn error_policy(_obj: Arc<AutoVPA>, _error: &Error, _ctx: Arc<Ctx>) -> Action {
 
 #[cfg(test)]
 mod test {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use futures::TryStreamExt;
-    use k8s_openapi::apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector};
+    use k8s_openapi::{
+        api::apps::v1::Deployment,
+        apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector},
+    };
     use kube::{
         api::{Patch, PatchParams},
+        core::GroupVersionKind,
         runtime::{watcher, WatchStreamExt},
-        Api,
+        Api, ResourceExt,
     };
 
     use crate::{
+        controller::{reconciler, Ctx},
         vpa::{
             ContainerControlledValues::RequestsAndLimits, ContainerPolicies, VerticalPodAutoscaler,
             VerticalPodAutoscalerResourcePolicy, VerticalPodAutoscalerSpec,
@@ -271,72 +290,93 @@ mod test {
     async fn integration_test_apply_vpa() -> anyhow::Result<()> {
         let client = kube::Client::try_default().await.unwrap();
         let gen_api: Api<AutoVPA> = Api::all(client.clone());
-        let auto_vpa = get_test_vpa_gen();
+
+        let autovpa_name = "office-test-autovpa";
+
+        let auto_vpa = get_test_vpa_gen(autovpa_name);
+        let test_workload = get_test_workload();
+
+        let workload_api: Api<Deployment> = Api::default_namespaced(client.clone());
         // println!("{:?}", auto_vpa.clone());
         gen_api
-            .patch("test-vpa-gen", &PatchParams::apply("autovpa.dev"), &Patch::Apply(auto_vpa))
+            .patch(
+                autovpa_name,
+                &PatchParams::apply("autovpa.dev"),
+                &Patch::Apply(auto_vpa.clone()),
+            )
             .await
             .unwrap();
 
-        kube::runtime::watcher(gen_api, watcher::Config::default())
-            .applied_objects()
-            .try_for_each(|g| async move {
-                println!("watched auto-vpa : {:?}", g);
-                Ok(())
-            })
-            .await?;
+        workload_api
+            .patch("nginx-deployment", &PatchParams::apply("autovpa.dev"), &Patch::Apply(test_workload))
+            .await
+            .unwrap();
 
-        let vpa = get_test_vpa();
-        dbg!(vpa);
+        let auto_vpa = gen_api.get(autovpa_name).await?;
+        reconciler(
+            Arc::new(auto_vpa.clone()),
+            Arc::new(Ctx {
+                client: client.clone(),
+                gvks: vec![GroupVersionKind::gvk("apps", "v1", "Deployment")],
+            }),
+        )
+        .await
+        .map_err(|err| {
+            println!("{}", &err as &dyn std::error::Error);
+        })
+        .ok();
 
+        //verify side effects happened
+        let output = gen_api.get_status(&auto_vpa.name_any()).await?;
+        assert_eq!(1, output.status.unwrap().matched);
+
+        // kube::runtime::watcher(gen_api, watcher::Config::default())
+        //     .applied_objects()
+        //     .try_for_each(|g| async move {
+        //         println!("watched auto-vpa : {:?}", g);
+        //         Ok(())
+        //     })
+        //     .await?;
+
+        let vpa = get_expected_vpa();
+        dbg!("expected vpa:", vpa);
         Ok(())
     }
 
-    fn get_test_vpa_gen() -> AutoVPA {
-        AutoVPA::new(
-            "test-vpa-gen",
-            crate::AutoVPASpec {
-                selector: LabelSelector {
-                    match_expressions: None,
-                    match_labels: Some(std::collections::BTreeMap::from([(
-                        "app".into(),
-                        "nginx".into(),
-                    )])),
-                },
-                vpa_template: crate::VerticalPodAutoscalerTemplateSpec {
-                    metadata: None,
-                    template: VerticalPodAutoscalerSpec {
-                        recommenders: None,
-                        target_ref: None,
-                        // VerticalPodAutoscalerTargetRef {
-                        //     // api_version: Some("apps/v1".to_owned()),
-                        //     // kind: "Deployment".to_owned(),
-                        //     // name: "nginx-deployment".to_owned(),
-                        // },
-                        resource_policy: Some(VerticalPodAutoscalerResourcePolicy {
-                            container_policies: Some(vec![ContainerPolicies {
-                                container_name: Some("nginx".to_string()),
-                                controlled_resources: Some(vec!["cpu".into(), "memory".into()]),
-                                controlled_values: Some(RequestsAndLimits),
-                                max_allowed: Some(BTreeMap::from([
-                                    ("cpu".into(), Quantity("2".into())),
-                                    ("memory".into(), Quantity("2048Mi".into())),
-                                ])),
-                                min_allowed: Some(BTreeMap::from([
-                                    ("cpu".into(), Quantity("1".into())),
-                                    ("memory".into(), Quantity("48Mi".into())),
-                                ])),
-                                mode: None,
-                            }]),
-                        }),
-                        update_policy: Some(Default::default()),
-                    },
-                },
-            },
-        )
+    fn get_test_vpa_gen(name: &str) -> AutoVPA {
+        let test_yaml = format!(r#"
+apiVersion: autovpa.dev/v1
+kind: AutoVPA
+metadata:
+  name: {}
+spec:
+  namespaceSelector:
+  - ali-office-test
+  objectSelector:
+    matchLabels:
+      app: santa
+  vpaTemplate:
+    template:
+      resourcePolicy:
+        containerPolicies:
+        - containerName: "*"
+          controlledResources:
+          - cpu
+          - memory
+          controlledValues: RequestsAndLimits
+          maxAllowed:
+            cpu: 50m
+            memory: 100Mi
+          minAllowed:
+            cpu: "6"
+            memory: 8Gi
+      updatePolicy:
+        updateMode: Auto
+        "#, name);
+        serde_yaml::from_str(&test_yaml).expect("invalid test autovpa yaml")
     }
 
-    fn get_test_vpa() -> VerticalPodAutoscaler {
+    fn get_expected_vpa() -> VerticalPodAutoscaler {
         let vpa_yaml = r"
         apiVersion: autoscaling.k8s.io/v1
         kind: VerticalPodAutoscaler
@@ -366,5 +406,32 @@ mod test {
             updateMode: Auto
         ";
         serde_yaml::from_str(vpa_yaml).expect("illegal input vpa yaml")
+    }
+
+    fn get_test_workload() -> Deployment {
+        let deployment_yaml = r#"
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: nginx-deployment
+          labels:
+            app: nginx
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: nginx
+          template:
+            metadata:
+              labels:
+                app: nginx
+            spec:
+              containers:
+              - name: nginx
+                image: nginx:1.14.2
+                ports:
+                - containerPort: 80
+        "#;
+        serde_yaml::from_str(deployment_yaml).expect("illegal input vpa yaml")
     }
 }
