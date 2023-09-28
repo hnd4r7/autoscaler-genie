@@ -126,11 +126,12 @@ pub async fn run() -> anyhow::Result<()> {
             move |o: DynamicObject| {
                 store
                     .find(|g| {
-                        let match_namespace = g.spec.namespace_selector.as_ref().map_or(true, |mn| {
+                        let match_namespace =
+                            g.spec.namespace_selector.as_ref().map_or(true, |mn| {
                                 o.namespace().map_or(false, |os| mn.contains(&os))
                             });
                         if !match_namespace {
-                            return false
+                            return false;
                         }
                         // select "Nothing" when selector is none, select "Everything" when selector is empty struct.
                         // ref: https://github.com/kubernetes/kubernetes/blob/master/vendor/k8s.io/apimachinery/pkg/apis/meta/v1/helpers.go#L36
@@ -143,7 +144,7 @@ pub async fn run() -> anyhow::Result<()> {
                         );
                         match_labels
                     })
-                    .map(|g|ObjectRef::from_obj(&*g))
+                    .map(|g| ObjectRef::from_obj(&*g))
             }
         };
 
@@ -205,11 +206,13 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
                 target.namespace().ok_or(Error::MissingObjectKey(".metadata.namespace"))?;
 
             match &obj.spec.namespace_selector {
-                Some(ns) => if !ns.contains(&target_namespace.clone()){
-                    debug!("skip obj with namespace: {}", target_namespace.clone());
-                    continue
-                },
-                _ => ()
+                Some(ns) => {
+                    if !ns.contains(&target_namespace.clone()) {
+                        debug!("skip obj with namespace: {}", target_namespace.clone());
+                        continue;
+                    }
+                }
+                _ => (),
             }
 
             let target_ref = VerticalPodAutoscalerTargetRef {
@@ -219,7 +222,6 @@ async fn reconciler(obj: Arc<AutoVPA>, ctx: Arc<Ctx>) -> Result<Action, Error> {
             };
 
             let vpa_name = format!("{}-vpa", target_name.clone());
-
 
             let vpa = VerticalPodAutoscaler {
                 metadata: ObjectMeta {
@@ -270,7 +272,7 @@ mod test {
         apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector},
     };
     use kube::{
-        api::{Patch, PatchParams},
+        api::{Patch, PatchParams, DeleteParams},
         core::GroupVersionKind,
         runtime::{watcher, WatchStreamExt},
         Api, ResourceExt,
@@ -308,9 +310,14 @@ mod test {
             .unwrap();
 
         workload_api
-            .patch("nginx-deployment", &PatchParams::apply("autovpa.dev"), &Patch::Apply(test_workload))
+            .patch(
+                "nginx-deployment",
+                &PatchParams::apply("autovpa.dev"),
+                &Patch::Apply(test_workload),
+            )
             .await
             .unwrap();
+
 
         let auto_vpa = gen_api.get(autovpa_name).await?;
         reconciler(
@@ -340,11 +347,14 @@ mod test {
 
         let vpa = get_expected_vpa();
         dbg!("expected vpa:", vpa);
+
+        workload_api.delete("nginx-deployment", &DeleteParams {..Default::default()}).await?;
         Ok(())
     }
 
     fn get_test_vpa_gen(name: &str) -> AutoVPA {
-        let test_yaml = format!(r#"
+        let test_yaml = format!(
+            r#"
 apiVersion: autovpa.dev/v1
 kind: AutoVPA
 metadata:
@@ -372,7 +382,9 @@ spec:
             memory: 8Gi
       updatePolicy:
         updateMode: Auto
-        "#, name);
+        "#,
+            name
+        );
         serde_yaml::from_str(&test_yaml).expect("invalid test autovpa yaml")
     }
 
@@ -417,7 +429,7 @@ spec:
           labels:
             app: nginx
         spec:
-          replicas: 3
+          replicas: 1
           selector:
             matchLabels:
               app: nginx
